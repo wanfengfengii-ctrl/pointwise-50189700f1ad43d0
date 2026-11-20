@@ -1,19 +1,15 @@
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from station.device.terminal import RawReading, Terminal
 from station.intake.binding import verify_terminal
 from station.intake.grading import Grade, grade_terminal
-from station.intake.receipt import ReceiptStore, SampleReceipt
+from station.intake.receipt import ReceiptStore
 from station.intake.repository import IntakeRepository, PieceConclusion
+from station.intake.result import AcceptanceResult
 from station.rounds.repository import transaction
 
-
-@dataclass(frozen=True)
-class AcceptanceResult:
-    conclusion: PieceConclusion
-    receipt: SampleReceipt | None
+__all__ = ['AcceptanceResult', 'accept', 'accept_dual']
 
 
 def _replay(existing: PieceConclusion, terminal: Terminal,
@@ -47,3 +43,9 @@ def accept(connection: sqlite3.Connection, order_id: str, terminal: Terminal, *,
         if before_commit is not None:
             before_commit()
     return AcceptanceResult(conclusion, receipt)
+
+
+def accept_dual(connection: sqlite3.Connection, order_id: str, message: dict, *,
+                before_commit: Callable[[], None] | None = None) -> AcceptanceResult | None:
+    from station.intake.dual import accept_dual as _accept_dual
+    return _accept_dual(connection, order_id, message, before_commit=before_commit)

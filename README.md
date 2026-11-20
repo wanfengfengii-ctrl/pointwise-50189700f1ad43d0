@@ -17,7 +17,7 @@ python3 -B -m unittest discover -s tests -t . -v
 python3 -B -m station.rounds.workstation demo examples/shift.json examples/retry.json
 ```
 
-`demo` 为每份脚本使用独立临时库，经过发令、实收和封轮后关闭原连接，再从同一数据库领取。它核对脚本中的手算期望并输出班账号和样本回执。未预期错误和样例差异返回非零退出码。
+`demo` 为每份脚本使用独立临时库，经过发令、实收和封轮后关闭原连接，再从同一数据库领取。它核对脚本中的手算期望并输出班账号和样本回执，随后另起一个临时库演示双头：右头第 11 拍先到不留回执，左头第 10 拍迟到后按原号签发并在重开后领回实际 `head`。未预期错误和样例差异返回非零退出码。
 
 ```sh
 python3 -B -m station.rounds.workstation init shift.sqlite3
@@ -38,6 +38,16 @@ python3 -B -m station.rounds.workstation round shift.sqlite3 round:shift-01
 6. `station.lookup.sample.get_sample(conn, receipt_number)` 返回原判级、原码、物理拍、原触发和读单。`station.lookup.round.get_round(conn, report_number)` 返回原班账和固定逐片结论。领取只需要数据库连接。
 
 用 `station.rounds.workstation.initialize_station(conn)` 初始化可写连接。公开写入口负责各自提交，领取在同一读取事务内核对相关引用。调用公开入口时连接应无活动事务。输入冲突或不合法操作报 `ValueError`，未知号报 `KeyError`，损坏的领取引用报 `ReferenceIntegrityError`，SQLite 写入及提交错误向调用方报告。
+
+## 双头首读
+
+`open(conn, round_id, roster, limit, mode="dual")` 开双头轮，模式随开轮冻结。`trigger` 签名不变，双头轮同参复投沿用原触发。
+
+- `station.device.optical.observe_dual(conn, exposure, observation)` 消费一个 `OpticalObservation`，返回本次发布的消息序列。每个 `reading` 首见时产出可独立递送的 `{"trigger_id", "kind": "raw", "head", "tick", "raw_code"}`；每次观察另产出 `{"trigger_id", "kind": "evidence", ...}`，记录该头已观察到的整数拍、已见原读拍和是否 `end`。同一头按源序推进，`end` 之后不再出样。
+- `station.intake.accept.accept_dual(conn, order_id, message, *, before_commit=None)` 递交一条消息。首读按最早物理拍，同拍左头优先；左侧候选只须排除右侧严格更早的有效原读，右侧候选还须排除左侧同拍的有效原读。证据宣告了尚未送达的原读拍时，该拍仍参与首读竞争，不得越过它先签更晚的拍。待证返回 `None`；具备胜出原包及资格证据时签发；两头已证结束且全程无原读记缺样、无回执。错绑或内容冲突报 `ValueError`，未知读单报 `KeyError`。结论、原件引用与首执一次提交，`before_commit` 在新结论提交前调用；失败不留新成果，重投同一消息续办。
+- 胜出或缺样与单头一样入班账、参与封轮。`get_sample` 额外返回双头样本实际 `head`。单头入口与双头入口互不接受对方轮的读单。
+
+`python3 -B -m station.rounds.workstation first-read DATABASE examples/first_read.json` 按样例逐案走一遍双头联合流程并核对手算期望。
 
 ## 两份手算样例
 

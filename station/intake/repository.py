@@ -15,6 +15,7 @@ class PieceConclusion:
     trigger_id: str
     source_id: str
     grade: Grade
+    head: str | None = None
 
 
 @dataclass(frozen=True)
@@ -29,13 +30,13 @@ class SourceTrace:
 
 
 def _conclusion(row) -> PieceConclusion:
-    conclusion_id, round_id, piece, order_id, trigger_id, source_id, grade = row
+    conclusion_id, round_id, piece, order_id, trigger_id, source_id, grade, head = row
     return PieceConclusion(conclusion_id, round_id, piece, order_id, trigger_id,
-                           source_id, Grade(grade))
+                           source_id, Grade(grade), head)
 
 
 _CONCLUSION_SELECT = '''
-    SELECT conclusion_id, round_id, piece, order_id, trigger_id, source_id, grade
+    SELECT conclusion_id, round_id, piece, order_id, trigger_id, source_id, grade, head
     FROM piece_conclusions
 '''
 
@@ -58,6 +59,10 @@ class IntakeRepository:
                 FOREIGN KEY (round_id, piece) REFERENCES roster(round_id, piece)
             )
         ''')
+        columns = {row[1] for row in self.connection.execute(
+            'PRAGMA table_info(piece_conclusions)')}
+        if 'head' not in columns:
+            self.connection.execute('ALTER TABLE piece_conclusions ADD COLUMN head TEXT')
 
     def find_for_piece(self, round_id: str, piece: str) -> PieceConclusion | None:
         row = self.connection.execute(
@@ -69,10 +74,22 @@ class IntakeRepository:
         binding = (terminal.round_id, terminal.piece, terminal.order_id,
                    terminal.trigger_id, terminal.source_id)
         insert = self.connection.execute('''
-            INSERT INTO piece_conclusions (round_id, piece, order_id, trigger_id, source_id, grade)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO piece_conclusions
+                (round_id, piece, order_id, trigger_id, source_id, grade, head)
+            VALUES (?, ?, ?, ?, ?, ?, NULL)
         ''', (*binding, grade.value))
         return PieceConclusion(insert.lastrowid, *binding, grade)
+
+    def insert_bound_conclusion(self, round_id: str, piece: str, order_id: str,
+                                trigger_id: str, source_id: str, grade: Grade,
+                                head: str | None) -> PieceConclusion:
+        insert = self.connection.execute('''
+            INSERT INTO piece_conclusions
+                (round_id, piece, order_id, trigger_id, source_id, grade, head)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (round_id, piece, order_id, trigger_id, source_id, grade.value, head))
+        return PieceConclusion(insert.lastrowid, round_id, piece, order_id, trigger_id,
+                               source_id, grade, head)
 
     def get_conclusion(self, conclusion_id: int) -> PieceConclusion | None:
         row = self.connection.execute(

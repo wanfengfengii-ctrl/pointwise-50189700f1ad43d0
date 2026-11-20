@@ -36,6 +36,51 @@ class DeviceRecording:
     def __init__(self, connection: sqlite3.Connection):
         self.connection = connection
 
+    @staticmethod
+    def prepare(connection: sqlite3.Connection) -> None:
+        """Let an older one-original-per-trigger table keep two head originals.
+
+        Runs on an idle connection before the initializing transaction so the foreign-key
+        pragma and table rebuild take effect. ``legacy_alter_table`` keeps the rename from
+        rewriting the references held by ``piece_conclusions``.
+        """
+        columns = {row[1] for row in connection.execute('PRAGMA table_info(device_terminals)')}
+        if not columns:
+            return
+        unique_trigger = False
+        for index in connection.execute('PRAGMA index_list(device_terminals)'):
+            if index[2] and [row[2] for row in connection.execute(
+                    f'PRAGMA index_info({index[1]})')] == ['trigger_id']:
+                unique_trigger = True
+        if not unique_trigger:
+            return
+        connection.execute('PRAGMA foreign_keys = OFF')
+        connection.execute('PRAGMA legacy_alter_table = ON')
+        try:
+            connection.execute('''
+                CREATE TABLE device_terminals_rebuilt (
+                    source_id TEXT PRIMARY KEY NOT NULL,
+                    trigger_id TEXT NOT NULL REFERENCES exposures(trigger_id),
+                    kind TEXT NOT NULL CHECK (kind IN ('reading', 'missing')),
+                    physical_tick TEXT,
+                    raw_code TEXT,
+                    CHECK ((kind = 'reading' AND physical_tick IS NOT NULL AND raw_code IS NOT NULL)
+                        OR (kind = 'missing' AND physical_tick IS NULL AND raw_code IS NULL))
+                )
+            ''')
+            connection.execute('''
+                INSERT INTO device_terminals_rebuilt
+                    (source_id, trigger_id, kind, physical_tick, raw_code)
+                SELECT source_id, trigger_id, kind, physical_tick, raw_code
+                FROM device_terminals
+            ''')
+            connection.execute('DROP TABLE device_terminals')
+            connection.execute('ALTER TABLE device_terminals_rebuilt RENAME TO device_terminals')
+            connection.commit()
+        finally:
+            connection.execute('PRAGMA legacy_alter_table = OFF')
+            connection.execute('PRAGMA foreign_keys = ON')
+
     def initialize(self) -> None:
         self.connection.execute('''
             CREATE TABLE IF NOT EXISTS exposures (
@@ -46,7 +91,7 @@ class DeviceRecording:
         self.connection.execute('''
             CREATE TABLE IF NOT EXISTS device_terminals (
                 source_id TEXT PRIMARY KEY NOT NULL,
-                trigger_id TEXT NOT NULL UNIQUE REFERENCES exposures(trigger_id),
+                trigger_id TEXT NOT NULL REFERENCES exposures(trigger_id),
                 kind TEXT NOT NULL CHECK (kind IN ('reading', 'missing')),
                 physical_tick TEXT,
                 raw_code TEXT,

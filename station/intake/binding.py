@@ -27,6 +27,9 @@ def verify_terminal(connection: sqlite3.Connection, order_id: str,
     exposure = recordings.find_exposure(order_id)
     if exposure is None:
         raise ValueError(f'read order {order_id!r} has not triggered')
+    round_record = rounds.require_round(order.round_id)
+    if round_record.mode != 'single':
+        raise ValueError(f'round {order.round_id!r} does not use the single-head intake')
     if (delivered.round_id, delivered.piece, delivered.trigger_id) != (
         order.round_id, order.piece, exposure.trigger_id
     ):
@@ -34,4 +37,4 @@ def verify_terminal(connection: sqlite3.Connection, order_id: str,
     original = recordings.get_terminal(exposure.trigger_id)
     if original is None or delivered != original:
         raise ValueError('delivered terminal differs from the device original')
-    return VerifiedTerminal(original, rounds.require_round(order.round_id).policy)
+    return VerifiedTerminal(original, round_record.policy)

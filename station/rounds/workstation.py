@@ -8,12 +8,15 @@ from tempfile import TemporaryDirectory
 
 from station.closing.repository import ClosingRepository
 from station.closing.seal import close
+from station.device.dual import DualDeviceRepository
+from station.device.dualscript import run_case
 from station.device.fixture import (DeliverySchedule, FailOnceBeforeCommit, InjectedCommitFailure,
-                                    ScenarioFixture, load_fixture)
-from station.device.optical import apply_observation
+                                    OpticalObservation, ScenarioFixture, load_fixture)
+from station.device.optical import apply_observation, observe_dual
 from station.device.recording import DeviceRecording
 from station.device.trigger import trigger
-from station.intake.accept import accept
+from station.intake.accept import accept, accept_dual
+from station.intake.dual import DualIntakeRepository
 from station.intake.receipt import ReceiptStore
 from station.intake.repository import IntakeRepository
 from station.lookup.round import get_round
@@ -27,10 +30,13 @@ def initialize_station(connection: sqlite3.Connection) -> None:
     if connection.in_transaction:
         raise ValueError('station initialization requires an idle connection')
     connection.execute('PRAGMA foreign_keys = ON')
+    DeviceRecording.prepare(connection)
     with transaction(connection, write=True):
         RoundRepository(connection).initialize()
         DeviceRecording(connection).initialize()
+        DualDeviceRepository(connection).initialize()
         IntakeRepository(connection).initialize()
+        DualIntakeRepository(connection).initialize()
         ReceiptStore(connection).initialize()
         ClosingRepository(connection).initialize()
 
@@ -151,6 +157,70 @@ def run_scenario(database: str | Path, fixture_path: str | Path) -> dict:
     return result
 
 
+def demo_dual(database: str | Path) -> dict:
+    """Show a dual round where the right head arrives first and the left first-read wins."""
+    round_id = 'dual-demo'
+    order_id = f'{round_id}/A'
+    with closing(sqlite3.connect(database)) as connection:
+        initialize_station(connection)
+        open(connection, round_id, ('A',), 48, mode='dual')
+        authorize_read(connection, round_id, 'A', order_id)
+        exposure = trigger(connection, round_id, 'A', order_id)
+        right = observe_dual(connection, exposure, OpticalObservation('right', 11, 'reading', 61))
+        left = observe_dual(connection, exposure, OpticalObservation('left', 10, 'reading', 48))
+        right_raw = [m for m in right if m['kind'] == 'raw'][0]
+        right_evidence = [m for m in right if m['kind'] == 'evidence'][0]
+        left_raw = [m for m in left if m['kind'] == 'raw'][0]
+        left_evidence = [m for m in left if m['kind'] == 'evidence'][0]
+        early = accept_dual(connection, order_id, right_raw)
+        early_evidence = accept_dual(connection, order_id, right_evidence)
+        late_evidence = accept_dual(connection, order_id, left_evidence)
+        signed = accept_dual(connection, order_id, left_raw)
+        if late_evidence is not None or signed is None:
+            raise RuntimeError('the late left first-read did not sign on its original')
+        report = close(connection, round_id).report
+        receipt_number = signed.receipt.number
+        if accept_dual(connection, order_id, left_evidence) != signed:
+            raise RuntimeError('dual signing replay differs from the first conclusion')
+    with closing(sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True)) as offline:
+        sample = get_sample(offline, receipt_number)
+        reopened = get_round(offline, report.number)
+    result = {
+        'case': 'dual-first-read',
+        'right_arrived_first_no_receipt': early is None and early_evidence is None,
+        'left_late_signed_with_receipt': True,
+        'closed_counts': asdict(reopened.counts),
+        'reopened_sample': {'piece': sample.piece, 'head': sample.head, 'tick': sample.tick,
+                            'raw_code': sample.raw_code, 'grade': sample.grade.value,
+                            'receipt': sample.receipt_number},
+    }
+    print('POINTWISE_DUAL_DEMO ' + json.dumps(result, sort_keys=True))
+    return result
+
+
+def run_first_read(database: str | Path, fixture_path: str | Path) -> dict:
+    """Run every case of a dual-head first-read fixture through a real station database."""
+    script = json.loads(Path(fixture_path).read_text(encoding='utf-8'))
+    results = []
+    with closing(sqlite3.connect(database)) as connection:
+        initialize_station(connection)
+        for case in script['cases']:
+            round_id = f'first-read-{case["id"]}'
+            if RoundRepository(connection).find_round(round_id) is not None:
+                raise ValueError(f'first-read fixture requires an unused round ID {round_id!r}')
+            outcomes = run_case(connection, case, script['limit'], round_id=round_id)
+            report = close(connection, round_id).report
+            results.append({
+                'case': case['id'],
+                'steps': [{'step': outcome.step, 'failed_once': outcome.failed_once,
+                           'signed': outcome.signed, 'sample': outcome.sample}
+                          for outcome in outcomes],
+                'closed_counts': None if report is None else asdict(report.counts),
+            })
+            print('POINTWISE_FIRST_READ ' + json.dumps(results[-1], sort_keys=True))
+    return {'database': str(database), 'cases': results}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='Run or audit the optical inspection station')
     actions = parser.add_subparsers(dest='action', required=True)
@@ -160,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
     run = actions.add_parser('run')
     run.add_argument('database')
     run.add_argument('fixture')
+    first_read = actions.add_parser('first-read')
+    first_read.add_argument('database')
+    first_read.add_argument('fixture')
     for name in ('sample', 'round'):
         lookup = actions.add_parser(name)
         lookup.add_argument('database')
@@ -169,8 +242,12 @@ def main(argv: list[str] | None = None) -> int:
         for fixture in args.fixtures:
             with TemporaryDirectory(prefix='optical-station-') as directory:
                 run_scenario(Path(directory) / 'station.sqlite3', fixture)
+        with TemporaryDirectory(prefix='optical-dual-') as directory:
+            demo_dual(Path(directory) / 'station.sqlite3')
     elif args.action == 'run':
         run_scenario(args.database, args.fixture)
+    elif args.action == 'first-read':
+        run_first_read(args.database, args.fixture)
     elif args.action == 'init':
         with closing(sqlite3.connect(args.database)) as connection:
             initialize_station(connection)

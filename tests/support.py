@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from station.device.fixture import OpticalObservation
-from station.device.optical import apply_observation
+from station.device.optical import apply_observation, observe_dual
 from station.device.trigger import trigger
 from station.rounds.authorization import authorize_read
 from station.rounds.opening import open
@@ -20,8 +20,8 @@ class StationCase(unittest.TestCase):
         self.addCleanup(self.connection.close)
         initialize_station(self.connection)
 
-    def open_round(self, pieces, limit=48, round_id='day'):
-        return open(self.connection, round_id, pieces, limit)
+    def open_round(self, pieces, limit=48, round_id='day', mode='single'):
+        return open(self.connection, round_id, pieces, limit, mode=mode)
 
     def order_id(self, piece, round_id='day'):
         return f'{round_id}/{piece}'
@@ -45,6 +45,15 @@ class StationCase(unittest.TestCase):
         connection = sqlite3.connect(self.database.as_uri() + '?mode=ro', uri=True)
         self.addCleanup(connection.close)
         return connection
+
+    def start_dual(self, piece, round_id='day'):
+        order_id = self.order_id(piece, round_id)
+        authorize_read(self.connection, round_id, piece, order_id)
+        return trigger(self.connection, round_id, piece, order_id)
+
+    def observe_dual(self, exposure, head, tick, kind, raw_code=None):
+        return observe_dual(self.connection, exposure,
+                            OpticalObservation(head, tick, kind, raw_code))
 
     def damaged_copy(self, mutation, params):
         path = self.database.with_name('audit-copy.sqlite3')
